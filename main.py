@@ -5,6 +5,7 @@ import json
 import subprocess
 import re
 import asyncio
+import requests # Added this back (crucial for submission)
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
@@ -13,12 +14,19 @@ from openai import OpenAI
 app = FastAPI()
 
 # --- CONFIGURATION ---
-# These will come from Render's Environment Variables
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+# Get the University Token from Render Environment
+AIPIPE_TOKEN = os.environ.get("AIPIPE_TOKEN")
+
 MY_EMAIL = "24f2004489@ds.study.iitm.ac.in" 
 MY_SECRET = "D2bUfDeHviRVcz6z6bUqTReloZ0R+7ggRlkuV/6/ea4="    
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Configure Client for AIPIPE (University Proxy)
+client = OpenAI(
+    api_key=AIPIPE_TOKEN,
+    base_url="https://aipipe.org/openrouter/v1"
+)
+
+MODEL_NAME = "anthropic/claude-3.7-sonnet"
 
 class QuizTask(BaseModel):
     email: str
@@ -97,7 +105,7 @@ async def solve_quiz_loop(start_url: str):
         """
 
         completion = client.chat.completions.create(
-            model="gpt-4o-mini", # Use gpt-4o if you have budget, mini is cheaper
+            model=MODEL_NAME, # Uses Claude via AIPIPE
             messages=[{"role": "system", "content": "You are a helpful coder."},
                       {"role": "user", "content": prompt}]
         )
@@ -129,7 +137,7 @@ async def solve_quiz_loop(start_url: str):
         """
         
         submission_completion = client.chat.completions.create(
-            model="gpt-4o",
+            model=MODEL_NAME, # Uses Claude via AIPIPE
             messages=[{"role": "user", "content": submission_prompt}]
         )
         
