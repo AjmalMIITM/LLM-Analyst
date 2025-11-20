@@ -14,7 +14,7 @@ from openai import OpenAI
 app = FastAPI()
 
 # --- CONFIGURATION ---
-AIPIPE_TOKEN = os.environ.get("OPENAI_API_KEY")
+AIPIPE_TOKEN = os.environ.get("AIPIPE_TOKEN") or os.environ.get("OPENAI_API_KEY")
 
 MY_EMAIL = "24f2004489@ds.study.iitm.ac.in" 
 MY_SECRET = "D2bUfDeHviRVcz6z6bUqTReloZ0R+7ggRlkuV/6/ea4="    
@@ -32,18 +32,13 @@ class QuizTask(BaseModel):
     url: str
 
 def extract_python_code(text):
-    """Extracts code from markdown blocks"""
     match = re.search(r"```python\n(.*?)```", text, re.DOTALL)
-    if match:
-        return match.group(1)
+    if match: return match.group(1)
     return text
 
 def extract_json(text):
-    """Extracts JSON object from text, ignoring chatty intros"""
-    # Finds the first { and the last }
     match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        return match.group(0)
+    if match: return match.group(0)
     return text
 
 def execute_python_code(code):
@@ -66,16 +61,18 @@ async def solve_quiz_loop(start_url: str):
     for i in range(5): 
         print(f"--- Step {i+1}: Processing {current_url} ---")
         
-        # 1. SCRAPE (Updated to wait for Network Idle)
+        # 1. SCRAPE THE PAGE (With explicit WAIT)
         task_text = ""
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             try:
-                # wait_until='networkidle' ensures JS has finished loading content
                 await page.goto(current_url, wait_until="networkidle", timeout=15000)
                 
-                # Fallback: sometimes networkidle is too slow, wait for body
+                # FORCE WAIT: Give JS 3 seconds to render the secret
+                await page.wait_for_timeout(3000)
+                
+                # Fallback: Ensure body exists
                 await page.wait_for_selector("body", timeout=5000)
                 
                 task_text = await page.inner_text("body")
@@ -101,15 +98,20 @@ async def solve_quiz_loop(start_url: str):
         YOUR GOAL:
         Write a Python script to solve the user's question.
         
+        CRITICAL INSTRUCTION FOR DATA SOURCING:
+        - Read the PAGE CONTENT carefully. 
+        - If it says "Scrape /api/data" or "Download data.csv", you MUST download THAT specific URL.
+        - Do not just download the current page again.
+        - Resolve relative links using the base URL: {current_url}
+        
         REQUIREMENTS:
-        1. Identify the Data Source. If the link is relative (e.g. '/data.csv'), construct the full URL using the base URL: {current_url}
-        2. Download the data (using requests) and process it (pandas, etc).
+        1. Download the correct data source using requests.
+        2. Process the data.
         3. Calculate the final answer.
         4. PRINT the answer to stdout. 
         
         CONSTRAINTS:
         - Do not use input().
-        - Do not use browser automation (selenium/playwright) inside the script.
         - Output ONLY executable Python code inside ```python ``` blocks.
         """
 
@@ -128,33 +130,22 @@ async def solve_quiz_loop(start_url: str):
         execution_output = execute_python_code(clean_code)
         print(f"Code Output: {execution_output}")
 
-        # 4. SUBMIT ANSWER (Robust JSON Parsing)
+        # 4. SUBMIT ANSWER
         submission_prompt = f"""
-        You are the Agent Controller. You must format the final submission.
+        You are the Agent Controller.
         
         CONTEXT:
         - Current Page URL: {current_url}
-        - Original Task Instructions: "{task_text}"
-        - Result from Code Execution: "{execution_output}"
+        - Code Execution Result: "{execution_output}"
         - My Email: {MY_EMAIL}
         - My Secret: {MY_SECRET}
         
         YOUR JOB:
-        1. **Find the Submission URL**: 
-           - If the URL is relative (e.g. '/submit'), resolve it to an absolute URL based on Current Page URL.
-           
-        2. **Construct the JSON Payload**:
-           - Standard keys: "email", "secret", "url" (the task url), "answer".
-           - Use the "Result from Code Execution" as the "answer".
+        1. **Find Submission URL**: Resolve relative URLs (like '/submit') to absolute.
+        2. **Construct Payload**: {{"email": "...", "secret": "...", "url": "...", "answer": ...}}
+           - Use the Code Execution Result as the answer.
         
-        OUTPUT FORMAT:
-        Return PURE JSON with exactly two top-level keys: "post_url" and "payload".
-        
-        Example:
-        {{
-            "post_url": "https://example.com/submit",
-            "payload": {{ "email": "...", "answer": ... }}
-        }}
+        OUTPUT: PURE JSON with keys "post_url" and "payload".
         """
         
         submission_completion = client.chat.completions.create(
@@ -163,12 +154,10 @@ async def solve_quiz_loop(start_url: str):
         )
         
         try:
-            # ROBUST JSON EXTRACTION
             raw_response = submission_completion.choices[0].message.content
-            json_str = extract_json(raw_response) # Uses Regex to find { }
+            json_str = extract_json(raw_response)
             
             decision_data = json.loads(json_str)
-            
             submit_url = decision_data.get("post_url")
             payload = decision_data.get("payload")
             
@@ -199,7 +188,6 @@ async def solve_quiz_loop(start_url: str):
                 
         except Exception as e:
             print(f"Error parsing Agent decision: {e}")
-            print(f"Raw LLM Output: {raw_response}")
             break
 
 @app.post("/analyze")
