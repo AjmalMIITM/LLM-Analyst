@@ -5,7 +5,7 @@ import json
 import subprocess
 import re
 import asyncio
-import requests # Added this back (crucial for submission)
+import requests 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
@@ -14,7 +14,7 @@ from openai import OpenAI
 app = FastAPI()
 
 # --- CONFIGURATION ---
-# Get the University Token from Render Environment
+# We look for AIPIPE_TOKEN. If not found, we check OPENAI_API_KEY just in case.
 AIPIPE_TOKEN = os.environ.get("OPENAI_API_KEY")
 
 MY_EMAIL = "24f2004489@ds.study.iitm.ac.in" 
@@ -26,6 +26,7 @@ client = OpenAI(
     base_url="https://aipipe.org/openrouter/v1"
 )
 
+# Using the high-end model
 MODEL_NAME = "anthropic/claude-3.7-sonnet"
 
 class QuizTask(BaseModel):
@@ -84,9 +85,12 @@ async def solve_quiz_loop(start_url: str):
         print(f"Scraped Instructions: {task_text[:100]}...")
 
         # 2. ASK LLM TO WRITE CODE
+        # UPDATED PROMPT: Includes 'current_url' to fix 404 errors with relative links
         prompt = f"""
-        You are a Python Data Analyst. Here is a task description scraped from a website:
+        You are a Python Data Analyst. 
+        I am currently on this URL: {current_url}
         
+        Here is the task description scraped from the page:
         "{task_text}"
         
         Your Goal:
@@ -98,14 +102,16 @@ async def solve_quiz_loop(start_url: str):
            - PRINT the answer to stdout.
            - If the answer is JSON, print valid JSON.
         
-        CRITICAL:
+        CRITICAL INSTRUCTIONS:
+        - If the text mentions relative links (like '/data.csv' or 'click here'), you MUST resolve them using the base URL: {current_url}
+        - Do not assume 'example.com'.
         - Do not use input().
         - Do not use browser automation (selenium/playwright) inside your script; use requests/pandas.
         - Output ONLY the python code inside ```python ``` blocks.
         """
 
         completion = client.chat.completions.create(
-            model=MODEL_NAME, # Uses Claude via AIPIPE
+            model=MODEL_NAME, 
             messages=[{"role": "system", "content": "You are a helpful coder."},
                       {"role": "user", "content": prompt}]
         )
@@ -121,7 +127,6 @@ async def solve_quiz_loop(start_url: str):
 
         # 4. SUBMIT ANSWER (The Agentic Part)
         # We now ask the LLM to look at the Output and Submit it.
-        # This is a "Reflection" step.
         
         submission_prompt = f"""
         I have executed the analysis code.
@@ -137,7 +142,7 @@ async def solve_quiz_loop(start_url: str):
         """
         
         submission_completion = client.chat.completions.create(
-            model=MODEL_NAME, # Uses Claude via AIPIPE
+            model=MODEL_NAME, 
             messages=[{"role": "user", "content": submission_prompt}]
         )
         
@@ -153,12 +158,12 @@ async def solve_quiz_loop(start_url: str):
             payload["secret"] = MY_SECRET
             
             # Find the submit URL from the text (using Regex for safety)
-            # The text usually says "Post your answer to https://..."
             submit_url_match = re.search(r"https?://[^\s]+submit", task_text)
             if submit_url_match:
                 submit_url = submit_url_match.group(0)
                 
                 # POST THE SUBMISSION
+                print(f"Submitting to: {submit_url}")
                 response = requests.post(submit_url, json=payload)
                 print(f"Submission Response: {response.text}")
                 
