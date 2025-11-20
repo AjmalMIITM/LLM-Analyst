@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+playwright
+openai
+requests
+pandas
+numpy
+scikit-learn
+pypdf
+beautifulsoup4
+pillow
+httpx
