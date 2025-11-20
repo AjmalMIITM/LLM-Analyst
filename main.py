@@ -15,7 +15,7 @@ app = FastAPI()
 
 # --- CONFIGURATION ---
 # We look for AIPIPE_TOKEN. If not found, we check OPENAI_API_KEY just in case.
-AIPIPE_TOKEN = os.environ.get("OPENAI_API_KEY")
+AIPIPE_TOKEN =  os.environ.get("OPENAI_API_KEY")
 
 MY_EMAIL = "24f2004489@ds.study.iitm.ac.in" 
 MY_SECRET = "D2bUfDeHviRVcz6z6bUqTReloZ0R+7ggRlkuV/6/ea4="    
@@ -62,8 +62,8 @@ def execute_python_code(code):
 async def solve_quiz_loop(start_url: str):
     current_url = start_url
     
-    # Limit recursion to 3 steps to avoid infinite loops
-    for i in range(3): 
+    # Limit recursion to 5 steps to handle multi-stage quizzes
+    for i in range(5): 
         print(f"--- Step {i+1}: Processing {current_url} ---")
         
         # 1. SCRAPE THE PAGE
@@ -85,29 +85,30 @@ async def solve_quiz_loop(start_url: str):
         print(f"Scraped Instructions: {task_text[:100]}...")
 
         # 2. ASK LLM TO WRITE CODE
-        # UPDATED PROMPT: Includes 'current_url' to fix 404 errors with relative links
+        # Prompt explicitly handles relative links and data sourcing
         prompt = f"""
-        You are a Python Data Analyst. 
-        I am currently on this URL: {current_url}
+        You are an Expert Python Data Analyst. 
         
-        Here is the task description scraped from the page:
+        CONTEXT:
+        - I am currently visiting this URL: {current_url}
+        - The page content is below.
+        
+        PAGE CONTENT:
         "{task_text}"
         
-        Your Goal:
-        1. Identify the Question and the Data Source (URL).
-        2. Identify the Submission URL (it is mentioned in the text).
-        3. Write a COMPLETE Python script to:
-           - Download the data (using requests, pandas, etc).
-           - Perform the analysis.
-           - PRINT the answer to stdout.
-           - If the answer is JSON, print valid JSON.
+        YOUR GOAL:
+        Write a Python script to solve the user's question.
         
-        CRITICAL INSTRUCTIONS:
-        - If the text mentions relative links (like '/data.csv' or 'click here'), you MUST resolve them using the base URL: {current_url}
-        - Do not assume 'example.com'.
+        REQUIREMENTS:
+        1. Identify the Data Source. If the link is relative (e.g. '/data.csv'), construct the full URL using the base URL: {current_url}
+        2. Download the data (using requests) and process it (pandas, etc).
+        3. Calculate the final answer.
+        4. PRINT the answer to stdout. 
+        
+        CONSTRAINTS:
         - Do not use input().
-        - Do not use browser automation (selenium/playwright) inside your script; use requests/pandas.
-        - Output ONLY the python code inside ```python ``` blocks.
+        - Do not use browser automation (selenium/playwright) inside the script.
+        - Output ONLY executable Python code inside ```python ``` blocks.
         """
 
         completion = client.chat.completions.create(
@@ -125,20 +126,43 @@ async def solve_quiz_loop(start_url: str):
         execution_output = execute_python_code(clean_code)
         print(f"Code Output: {execution_output}")
 
-        # 4. SUBMIT ANSWER (The Agentic Part)
-        # We now ask the LLM to look at the Output and Submit it.
+        # 4. SUBMIT ANSWER (The "Brain" decides where to post)
+        # We removed the Regex. The LLM must reason about the submission URL.
         
         submission_prompt = f"""
-        I have executed the analysis code.
+        You are the Agent Controller. You must format the final submission.
         
-        Original Task: {task_text}
-        Code Execution Output: {execution_output}
+        CONTEXT:
+        - Current Page URL: {current_url}
+        - Original Task Instructions: "{task_text}"
+        - Result from Code Execution: "{execution_output}"
+        - My Email: {MY_EMAIL}
+        - My Secret: {MY_SECRET}
         
-        Your Goal:
-        Construct the JSON payload to submit.
-        The format usually requires: "email", "secret", "url", "answer".
+        YOUR JOB:
+        1. **Find the Submission URL**: Read the Task Instructions carefully. 
+           - It will say "Post your answer to..." or "Submit to...".
+           - If the URL is relative (e.g. '/submit'), you MUST resolve it to an absolute URL based on Current Page URL.
+           - If it is absolute, use it as is.
+           
+        2. **Construct the JSON Payload**:
+           - Standard keys: "email", "secret", "url" (the task url), "answer".
+           - Use the "Result from Code Execution" as the "answer".
+           - If the result is a number, send a number. If text, send text.
         
-        Return ONLY the JSON object.
+        OUTPUT FORMAT:
+        Return PURE JSON with exactly two top-level keys: "post_url" and "payload".
+        
+        Example:
+        {{
+            "post_url": "https://example.com/submit",
+            "payload": {{
+                "email": "...",
+                "secret": "...",
+                "url": "...",
+                "answer": 12345
+            }}
+        }}
         """
         
         submission_completion = client.chat.completions.create(
@@ -147,43 +171,44 @@ async def solve_quiz_loop(start_url: str):
         )
         
         try:
-            # Extract JSON from LLM response
+            # Clean and Parse JSON
             json_str = submission_completion.choices[0].message.content
-            # Cleanup markdown if present
             json_str = json_str.replace("```json", "").replace("```", "").strip()
-            payload = json.loads(json_str)
             
-            # Ensure email/secret are correct
-            payload["email"] = MY_EMAIL
-            payload["secret"] = MY_SECRET
+            decision_data = json.loads(json_str)
             
-            # Find the submit URL from the text (using Regex for safety)
-            submit_url_match = re.search(r"https?://[^\s]+submit", task_text)
-            if submit_url_match:
-                submit_url = submit_url_match.group(0)
-                
+            submit_url = decision_data.get("post_url")
+            payload = decision_data.get("payload")
+            
+            print(f"Agent decided to submit to: {submit_url}")
+            
+            if submit_url and payload:
                 # POST THE SUBMISSION
-                print(f"Submitting to: {submit_url}")
                 response = requests.post(submit_url, json=payload)
                 print(f"Submission Response: {response.text}")
                 
-                response_data = response.json()
-                if response_data.get("correct") is True:
-                    next_url = response_data.get("url")
-                    if next_url:
-                        current_url = next_url # RECURSION: Go to next level
+                try:
+                    response_data = response.json()
+                    if response_data.get("correct") is True:
+                        next_url = response_data.get("url")
+                        if next_url:
+                            current_url = next_url # Recursion
+                        else:
+                            print("Quiz Completed Successfully!")
+                            break
                     else:
-                        print("Quiz Completed Successfully!")
+                        print("Answer incorrect. Retrying not implemented.")
                         break
-                else:
-                    print("Answer incorrect, retrying not implemented yet.")
+                except:
+                    print("Response was not JSON.")
                     break
             else:
-                print("Could not find submission URL in text.")
+                print("LLM failed to determine submission URL or payload.")
                 break
                 
         except Exception as e:
-            print(f"Error during submission parsing: {e}")
+            print(f"Error parsing Agent decision: {e}")
+            print(f"Raw LLM Output: {submission_completion.choices[0].message.content}")
             break
 
 @app.post("/analyze")
