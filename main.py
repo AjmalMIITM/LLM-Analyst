@@ -129,7 +129,7 @@ async def solve_quiz_loop(start_url: str):
         """
         
         submission_completion = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=[{"role": "user", "content": submission_prompt}]
         )
         
