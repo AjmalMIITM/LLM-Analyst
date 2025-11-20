@@ -37,6 +37,7 @@ def extract_python_code(text):
     return text
 
 def extract_json(text):
+    # Finds the first { and the last } to extract valid JSON
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match: return match.group(0)
     return text
@@ -61,20 +62,19 @@ async def solve_quiz_loop(start_url: str):
     for i in range(5): 
         print(f"--- Step {i+1}: Processing {current_url} ---")
         
-        # 1. SCRAPE THE PAGE (With explicit WAIT)
+        # 1. SCRAPE
         task_text = ""
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             try:
+                # Wait for Network Idle (Important for Step 2)
                 await page.goto(current_url, wait_until="networkidle", timeout=15000)
                 
-                # FORCE WAIT: Give JS 3 seconds to render the secret
+                # Explicit wait for JS-rendered content (The "Invisible Ink" fix)
                 await page.wait_for_timeout(3000)
                 
-                # Fallback: Ensure body exists
                 await page.wait_for_selector("body", timeout=5000)
-                
                 task_text = await page.inner_text("body")
             except Exception as e:
                 print(f"Scraping failed: {e}")
@@ -99,19 +99,14 @@ async def solve_quiz_loop(start_url: str):
         Write a Python script to solve the user's question.
         
         CRITICAL INSTRUCTION FOR DATA SOURCING:
-        - Read the PAGE CONTENT carefully. 
-        - If it says "Scrape /api/data" or "Download data.csv", you MUST download THAT specific URL.
-        - Do not just download the current page again.
+        - If the page content mentions "Download" or relative paths like '/data.csv', you MUST download that specific URL (using requests).
         - Resolve relative links using the base URL: {current_url}
         
         REQUIREMENTS:
-        1. Download the correct data source using requests.
-        2. Process the data.
-        3. Calculate the final answer.
-        4. PRINT the answer to stdout. 
+        1. Script must handle the task (download data, calculate answer, etc).
+        2. PRINT the final answer to stdout.
         
         CONSTRAINTS:
-        - Do not use input().
         - Output ONLY executable Python code inside ```python ``` blocks.
         """
 
@@ -121,16 +116,34 @@ async def solve_quiz_loop(start_url: str):
                       {"role": "user", "content": prompt}]
         )
         
-        generated_code = completion.choices[0].message.content
-        clean_code = extract_python_code(generated_code)
-        
+        clean_code = extract_python_code(completion.choices[0].message.content)
         print("Executing Generated Code...")
         
         # 3. EXECUTE CODE
         execution_output = execute_python_code(clean_code)
         print(f"Code Output: {execution_output}")
 
-        # 4. SUBMIT ANSWER
+        # --- THE SHORT CIRCUIT FIX ---
+        # Check if the Python script already submitted the answer successfully.
+        # If we see {"correct": true} in the output, we SKIP the second submission.
+        if '"correct": true' in execution_output or '"correct":true' in execution_output:
+            print("Internal script already solved the task. Checking for next URL...")
+            try:
+                # Try to extract the JSON response from the code output
+                output_json = extract_json(execution_output)
+                response_data = json.loads(output_json)
+                next_url = response_data.get("url")
+                if next_url:
+                    print(f"Recursion: Jumping to {next_url}")
+                    current_url = next_url
+                    continue # Skip to next iteration of loop
+                else:
+                    print("Quiz Completed Successfully!")
+                    break
+            except:
+                print("Could not parse success JSON from output, proceeding to manual submit...")
+        
+        # 4. SUBMIT ANSWER (Only if script didn't do it)
         submission_prompt = f"""
         You are the Agent Controller.
         
@@ -141,9 +154,10 @@ async def solve_quiz_loop(start_url: str):
         - My Secret: {MY_SECRET}
         
         YOUR JOB:
-        1. **Find Submission URL**: Resolve relative URLs (like '/submit') to absolute.
-        2. **Construct Payload**: {{"email": "...", "secret": "...", "url": "...", "answer": ...}}
-           - Use the Code Execution Result as the answer.
+        1. Find Submission URL (resolve relative URLs).
+        2. Construct Payload: {{"email": "...", "secret": "...", "url": "...", "answer": ...}}
+           - Use the content of the Result as the answer.
+           - If the result is a large object, extract only the answer value.
         
         OUTPUT: PURE JSON with keys "post_url" and "payload".
         """
@@ -156,8 +170,8 @@ async def solve_quiz_loop(start_url: str):
         try:
             raw_response = submission_completion.choices[0].message.content
             json_str = extract_json(raw_response)
-            
             decision_data = json.loads(json_str)
+            
             submit_url = decision_data.get("post_url")
             payload = decision_data.get("payload")
             
@@ -167,25 +181,20 @@ async def solve_quiz_loop(start_url: str):
                 response = requests.post(submit_url, json=payload)
                 print(f"Submission Response: {response.text}")
                 
-                try:
-                    response_data = response.json()
-                    if response_data.get("correct") is True:
-                        next_url = response_data.get("url")
-                        if next_url:
-                            current_url = next_url 
-                        else:
-                            print("Quiz Completed Successfully!")
-                            break
+                response_data = response.json()
+                if response_data.get("correct") is True:
+                    next_url = response_data.get("url")
+                    if next_url:
+                        current_url = next_url 
                     else:
-                        print("Answer incorrect. Retrying not implemented.")
+                        print("Quiz Completed Successfully!")
                         break
-                except:
-                    print("Response was not JSON.")
+                else:
+                    print("Answer incorrect. Retrying not implemented.")
                     break
             else:
                 print("LLM failed to determine submission URL or payload.")
                 break
-                
         except Exception as e:
             print(f"Error parsing Agent decision: {e}")
             break
