@@ -15,7 +15,7 @@ app = FastAPI()
 
 # --- CONFIGURATION ---
 # Get the University Token from Render Environment
-AIPIPE_TOKEN = os.environ.get("AIPIPE_TOKEN")
+AIPIPE_TOKEN = os.environ.get("OPENAI_API_KEY")
 
 MY_EMAIL = "24f2004489@ds.study.iitm.ac.in" 
 MY_SECRET = "D2bUfDeHviRVcz6z6bUqTReloZ0R+7ggRlkuV/6/ea4="    
