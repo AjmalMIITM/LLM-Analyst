@@ -5,6 +5,7 @@ import json
 import subprocess
 import re
 import asyncio
+import base64
 import requests 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -32,18 +33,13 @@ class QuizTask(BaseModel):
     url: str
 
 def extract_python_code(text):
-    """Extracts code from markdown blocks"""
     match = re.search(r"```python\n(.*?)```", text, re.DOTALL)
-    if match:
-        return match.group(1)
+    if match: return match.group(1)
     return text
 
 def extract_json(text):
-    """Extracts JSON object from text, ignoring chatty intros"""
-    # Finds the first { and the last }
     match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        return match.group(0)
+    if match: return match.group(0)
     return text
 
 def execute_python_code(code):
@@ -66,95 +62,114 @@ async def solve_quiz_loop(start_url: str):
     for i in range(5): 
         print(f"--- Step {i+1}: Processing {current_url} ---")
         
-        # 1. SCRAPE (Updated to wait for Network Idle)
+        # 1. SCRAPE & SCREENSHOT
         task_text = ""
+        screenshot_b64 = ""
+        
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             try:
-                # wait_until='networkidle' ensures JS has finished loading content
                 await page.goto(current_url, wait_until="networkidle", timeout=15000)
-                
-                # Fallback: sometimes networkidle is too slow, wait for body
+                await page.wait_for_timeout(4000) # Wait for JS/Images
                 await page.wait_for_selector("body", timeout=5000)
                 
+                # Get Text
                 task_text = await page.inner_text("body")
+                
+                # Get Screenshot (Vision)
+                screenshot_bytes = await page.screenshot(format="jpeg", quality=50)
+                screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+                
             except Exception as e:
                 print(f"Scraping failed: {e}")
                 break
             finally:
                 await browser.close()
 
-        print(f"Scraped Instructions: {task_text[:100]}...")
+        print(f"Scraped Instructions (Text): {task_text[:100]}...")
 
-        # 2. ASK LLM TO WRITE CODE
-        prompt = f"""
-        You are an Expert Python Data Analyst. 
-        
-        CONTEXT:
-        - I am currently visiting this URL: {current_url}
-        - The page content is below.
-        
-        PAGE CONTENT:
-        "{task_text}"
-        
-        YOUR GOAL:
-        Write a Python script to solve the user's question.
-        
-        REQUIREMENTS:
-        1. Identify the Data Source. If the link is relative (e.g. '/data.csv'), construct the full URL using the base URL: {current_url}
-        2. Download the data (using requests) and process it (pandas, etc).
-        3. Calculate the final answer.
-        4. PRINT the answer to stdout. 
-        
-        CONSTRAINTS:
-        - Do not use input().
-        - Do not use browser automation (selenium/playwright) inside the script.
-        - Output ONLY executable Python code inside ```python ``` blocks.
-        """
+        # 2. ASK LLM (WITH VISION)
+        # We construct a message with both Text and Image
+        messages = [
+            {"role": "system", "content": "You are an Expert Python Data Analyst. Use the attached Screenshot and Text to solve the task."},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"""
+                        CONTEXT:
+                        - URL: {current_url}
+                        - Email: "{MY_EMAIL}"
+                        - Page Text: "{task_text}"
+                        
+                        YOUR GOAL:
+                        1. Look at the SCREENSHOT to understand the question (especially if text is empty).
+                        2. If the page asks to download data, write Python requests code to download it.
+                        3. Calculate the answer.
+                        4. PRINT the answer to stdout.
+                        
+                        CRITICAL:
+                        - Resolve relative links using base URL: {current_url}
+                        - Use variable `email = "{MY_EMAIL}"`
+                        - Output ONLY executable Python code inside ```python``` blocks.
+                        """
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{screenshot_b64}"
+                        }
+                    }
+                ]
+            }
+        ]
 
         completion = client.chat.completions.create(
             model=MODEL_NAME, 
-            messages=[{"role": "system", "content": "You are a helpful coder."},
-                      {"role": "user", "content": prompt}]
+            messages=messages
         )
         
-        generated_code = completion.choices[0].message.content
-        clean_code = extract_python_code(generated_code)
-        
+        clean_code = extract_python_code(completion.choices[0].message.content)
         print("Executing Generated Code...")
         
         # 3. EXECUTE CODE
         execution_output = execute_python_code(clean_code)
         print(f"Code Output: {execution_output}")
 
-        # 4. SUBMIT ANSWER (Robust JSON Parsing)
+        # Short Circuit
+        if '"correct": true' in execution_output or '"correct":true' in execution_output:
+            print("Internal script solved it. Jumping to next URL...")
+            try:
+                output_json = extract_json(execution_output)
+                response_data = json.loads(output_json)
+                next_url = response_data.get("url")
+                if next_url:
+                    current_url = next_url
+                    continue 
+                else:
+                    print("Quiz Completed Successfully!")
+                    break
+            except:
+                pass
+        
+        # 4. SUBMIT ANSWER
         submission_prompt = f"""
-        You are the Agent Controller. You must format the final submission.
+        You are the Agent Controller.
         
         CONTEXT:
-        - Current Page URL: {current_url}
-        - Original Task Instructions: "{task_text}"
-        - Result from Code Execution: "{execution_output}"
-        - My Email: {MY_EMAIL}
-        - My Secret: {MY_SECRET}
+        - URL: {current_url}
+        - Code Result: "{execution_output}"
+        - Email: {MY_EMAIL}
+        - Secret: {MY_SECRET}
         
         YOUR JOB:
-        1. **Find the Submission URL**: 
-           - If the URL is relative (e.g. '/submit'), resolve it to an absolute URL based on Current Page URL.
-           
-        2. **Construct the JSON Payload**:
-           - Standard keys: "email", "secret", "url" (the task url), "answer".
-           - Use the "Result from Code Execution" as the "answer".
+        1. Find Submission URL.
+        2. Construct Payload: {{"email": "{MY_EMAIL}", "secret": "{MY_SECRET}", "url": "...", "answer": ...}}
+           - Use the content of the Result as the answer.
         
-        OUTPUT FORMAT:
-        Return PURE JSON with exactly two top-level keys: "post_url" and "payload".
-        
-        Example:
-        {{
-            "post_url": "https://example.com/submit",
-            "payload": {{ "email": "...", "answer": ... }}
-        }}
+        OUTPUT: PURE JSON with keys "post_url" and "payload".
         """
         
         submission_completion = client.chat.completions.create(
@@ -163,43 +178,36 @@ async def solve_quiz_loop(start_url: str):
         )
         
         try:
-            # ROBUST JSON EXTRACTION
             raw_response = submission_completion.choices[0].message.content
-            json_str = extract_json(raw_response) # Uses Regex to find { }
-            
+            json_str = extract_json(raw_response)
             decision_data = json.loads(json_str)
             
             submit_url = decision_data.get("post_url")
             payload = decision_data.get("payload")
             
             print(f"Agent decided to submit to: {submit_url}")
+            print(f"Payload: {json.dumps(payload)}") # Log payload for debugging
             
             if submit_url and payload:
                 response = requests.post(submit_url, json=payload)
                 print(f"Submission Response: {response.text}")
                 
-                try:
-                    response_data = response.json()
-                    if response_data.get("correct") is True:
-                        next_url = response_data.get("url")
-                        if next_url:
-                            current_url = next_url 
-                        else:
-                            print("Quiz Completed Successfully!")
-                            break
+                response_data = response.json()
+                if response_data.get("correct") is True:
+                    next_url = response_data.get("url")
+                    if next_url:
+                        current_url = next_url 
                     else:
-                        print("Answer incorrect. Retrying not implemented.")
+                        print("Quiz Completed Successfully!")
                         break
-                except:
-                    print("Response was not JSON.")
+                else:
+                    print("Answer incorrect. Retrying not implemented.")
                     break
             else:
                 print("LLM failed to determine submission URL or payload.")
                 break
-                
         except Exception as e:
             print(f"Error parsing Agent decision: {e}")
-            print(f"Raw LLM Output: {raw_response}")
             break
 
 @app.post("/analyze")
