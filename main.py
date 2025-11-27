@@ -38,9 +38,26 @@ def extract_python_code(text):
     return text
 
 def extract_json(text):
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match: return match.group(0)
-    return text
+    """
+    Robust JSON Extractor using Brace Counting.
+    Finds the first valid JSON object { ... } and ignores all other text.
+    """
+    text = text.strip()
+    start_index = text.find('{')
+    if start_index == -1:
+        return ""
+    
+    balance = 0
+    for i in range(start_index, len(text)):
+        char = text[i]
+        if char == '{':
+            balance += 1
+        elif char == '}':
+            balance -= 1
+            if balance == 0:
+                # Found the matching closing brace
+                return text[start_index : i+1]
+    return ""
 
 def execute_python_code(code):
     try:
@@ -71,13 +88,12 @@ async def solve_quiz_loop(start_url: str):
             page = await browser.new_page()
             try:
                 await page.goto(current_url, wait_until="networkidle", timeout=15000)
-                await page.wait_for_timeout(4000) # Wait for JS/Images
+                await page.wait_for_timeout(4000) 
                 await page.wait_for_selector("body", timeout=5000)
                 
-                # Get Text
                 task_text = await page.inner_text("body")
                 
-                # Get Screenshot (Vision) - FIX: Use type="jpeg"
+                # Vision Screenshot (Using type="jpeg")
                 screenshot_bytes = await page.screenshot(type="jpeg", quality=50)
                 screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
                 
@@ -89,9 +105,9 @@ async def solve_quiz_loop(start_url: str):
 
         print(f"Scraped Instructions (Text): {task_text[:100]}...")
 
-        # 2. ASK LLM (WITH VISION)
+        # 2. ASK LLM (WITH VISION & MATH INSTRUCTIONS)
         messages = [
-            {"role": "system", "content": "You are an Expert Python Data Analyst. Use the attached Screenshot and Text to solve the task."},
+            {"role": "system", "content": "You are an Expert Python Data Analyst."},
             {
                 "role": "user",
                 "content": [
@@ -104,15 +120,22 @@ async def solve_quiz_loop(start_url: str):
                         - Page Text: "{task_text}"
                         
                         YOUR GOAL:
-                        1. Look at the SCREENSHOT to understand the question (especially if text is empty).
-                        2. If the page asks to download data, write Python requests code to download it.
-                        3. Calculate the answer.
-                        4. PRINT the answer to stdout.
+                        Write a Python script to solve the question.
                         
-                        CRITICAL:
-                        - Resolve relative links using base URL: {current_url}
-                        - Use variable `email = "{MY_EMAIL}"`
-                        - Output ONLY executable Python code inside ```python``` blocks.
+                        CRITICAL INSTRUCTIONS:
+                        1. **MATH/LOGIC**: If the page describes an algorithm (e.g., "Calculate SHA1 of email", "Solve this math equation"), YOU MUST WRITE PYTHON TO CALCULATE IT.
+                           - Do NOT just print the HTML page text.
+                           - Import `hashlib`, `math`, etc., as needed.
+                           
+                        2. **DATA DOWNLOADING**: If the page asks to download a specific file/link, write requests code to download THAT link.
+                        
+                        3. **VISION**: Look at the screenshot if the text is missing details.
+                        
+                        4. **OUTPUT**: Print the FINAL ANSWER to stdout.
+                        
+                        Variable: email = "{MY_EMAIL}"
+                        Resolve relative links using base URL: {current_url}
+                        Output ONLY executable Python code inside ```python``` blocks.
                         """
                     },
                     {
@@ -166,7 +189,8 @@ async def solve_quiz_loop(start_url: str):
         YOUR JOB:
         1. Find Submission URL.
         2. Construct Payload: {{"email": "{MY_EMAIL}", "secret": "{MY_SECRET}", "url": "...", "answer": ...}}
-           - Use the content of the Result as the answer.
+           - Use the content of the Code Result as the answer.
+           - If the Result is just a number or short string, use that.
         
         OUTPUT: PURE JSON with keys "post_url" and "payload".
         """
@@ -178,14 +202,20 @@ async def solve_quiz_loop(start_url: str):
         
         try:
             raw_response = submission_completion.choices[0].message.content
+            # Use the new Robust JSON Extractor
             json_str = extract_json(raw_response)
+            
+            if not json_str:
+                print("Failed to find JSON in LLM response.")
+                print(f"Raw: {raw_response}")
+                break
+
             decision_data = json.loads(json_str)
             
             submit_url = decision_data.get("post_url")
             payload = decision_data.get("payload")
             
             print(f"Agent decided to submit to: {submit_url}")
-            # print(f"Payload: {json.dumps(payload)}") 
             
             if submit_url and payload:
                 response = requests.post(submit_url, json=payload)
