@@ -77,8 +77,8 @@ async def solve_quiz_loop(start_url: str):
                 # Get Text
                 task_text = await page.inner_text("body")
                 
-                # Get Screenshot (Vision)
-                screenshot_bytes = await page.screenshot(format="jpeg", quality=50)
+                # Get Screenshot (Vision) - FIX: Use type="jpeg"
+                screenshot_bytes = await page.screenshot(type="jpeg", quality=50)
                 screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
                 
             except Exception as e:
@@ -90,7 +90,6 @@ async def solve_quiz_loop(start_url: str):
         print(f"Scraped Instructions (Text): {task_text[:100]}...")
 
         # 2. ASK LLM (WITH VISION)
-        # We construct a message with both Text and Image
         messages = [
             {"role": "system", "content": "You are an Expert Python Data Analyst. Use the attached Screenshot and Text to solve the task."},
             {
@@ -186,7 +185,7 @@ async def solve_quiz_loop(start_url: str):
             payload = decision_data.get("payload")
             
             print(f"Agent decided to submit to: {submit_url}")
-            print(f"Payload: {json.dumps(payload)}") # Log payload for debugging
+            # print(f"Payload: {json.dumps(payload)}") 
             
             if submit_url and payload:
                 response = requests.post(submit_url, json=payload)
